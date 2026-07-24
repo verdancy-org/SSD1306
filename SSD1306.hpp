@@ -2,7 +2,7 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: SSD1306 OLED panel backend that subscribes to Display frames and flushes over I2C.
+module_description: SSD1306 OLED panel backend that subscribes to DisplaySurface frames and flushes over I2C.
 constructor_args:
   - i2c_alias: "i2c_oled"
   - address: 0x3C
@@ -12,7 +12,7 @@ template_args: []
 required_hardware:
   - i2c_oled
 depends:
-  - Display
+  - DisplaySurface
 === END MANIFEST === */
 // clang-format on
 
@@ -22,7 +22,7 @@ depends:
 #include <cstdint>
 #include <cstring>
 
-#include "Display.hpp"
+#include "DisplaySurface.hpp"
 #include "app_framework.hpp"
 #include "i2c.hpp"
 #include "logger.hpp"
@@ -30,62 +30,73 @@ depends:
 #include "thread.hpp"
 #include "timebase.hpp"
 
-class SSD1306 : public LibXR::Application {
-public:
+class SSD1306 : public LibXR::Application
+{
+ public:
   static constexpr std::uint8_t DEFAULT_ADDRESS = 0x3C;
 
-  SSD1306(LibXR::HardwareContainer &hw, LibXR::ApplicationManager &app,
-          const char *i2c_alias = "i2c_oled",
-          std::uint8_t address = DEFAULT_ADDRESS,
-          const char *frame_topic_name = Display::DEFAULT_FRAME_TOPIC,
+  SSD1306(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
+          const char* i2c_alias = "i2c_oled", std::uint8_t address = DEFAULT_ADDRESS,
+          const char* frame_topic_name = DisplaySurface::DEFAULT_FRAME_TOPIC,
           std::uint16_t chunk_bytes = MAX_DATA_PAYLOAD)
-      : address_(address), chunk_payload_size_(NormalizeChunkSize(chunk_bytes)),
+      : address_(address),
+        chunk_payload_size_(NormalizeChunkSize(chunk_bytes)),
         i2c_(hw.template FindOrExit<LibXR::I2C>({i2c_alias})),
-        frame_topic_(
-            LibXR::Topic::CreateTopic<Display::Frame>(frame_topic_name)),
-        frame_sub_(frame_topic_) {
+        frame_topic_(LibXR::Topic::CreateTopic<DisplaySurface::Frame>(frame_topic_name)),
+        frame_sub_(frame_topic_)
+  {
     app.Register(*this);
     (void)i2c_->SetConfig({400000U});
     frame_sub_.StartWaiting();
 
     initialized_ = Init();
-    if (initialized_) {
+    if (initialized_)
+    {
       XR_LOG_PASS("SSD1306: init succeeded");
-    } else {
+    }
+    else
+    {
       XR_LOG_WARN("SSD1306: init failed, will retry");
     }
   }
 
-  void OnMonitor() override {
-    if (frame_sub_.Available()) {
+  void OnMonitor() override
+  {
+    if (frame_sub_.Available())
+    {
       pending_frame_ = frame_sub_.GetData();
       has_pending_frame_ = true;
       frame_sub_.StartWaiting();
     }
 
-    if (!initialized_) {
+    if (!initialized_)
+    {
       RetryInit();
       return;
     }
 
-    if (!has_pending_frame_) {
+    if (!has_pending_frame_)
+    {
       return;
     }
 
     const auto ans = FlushFrame(pending_frame_);
-    if (ans == LibXR::ErrorCode::OK) {
+    if (ans == LibXR::ErrorCode::OK)
+    {
       has_pending_frame_ = false;
-    } else {
-      const auto now_ms =
-          static_cast<std::uint32_t>(LibXR::Timebase::GetMilliseconds());
-      if ((now_ms - last_error_log_ms_) > ERROR_LOG_INTERVAL_MS) {
+    }
+    else
+    {
+      const auto now_ms = static_cast<std::uint32_t>(LibXR::Timebase::GetMilliseconds());
+      if ((now_ms - last_error_log_ms_) > ERROR_LOG_INTERVAL_MS)
+      {
         last_error_log_ms_ = now_ms;
         XR_LOG_WARN("SSD1306: flush failed %d", static_cast<int>(ans));
       }
     }
   }
 
-private:
+ private:
   static constexpr std::uint8_t CTRL_COMMAND = 0x00;
   static constexpr std::uint8_t CTRL_DATA = 0x40;
   static constexpr std::uint8_t CMD_DISPLAY_OFF = 0xAE;
@@ -115,24 +126,29 @@ private:
   static constexpr std::uint32_t INIT_RETRY_INTERVAL_MS = 500;
   static constexpr std::uint32_t ERROR_LOG_INTERVAL_MS = 1000;
 
-  struct FlushBounds {
+  struct FlushBounds
+  {
     std::uint16_t x_begin = 0;
     std::uint16_t x_end = 0;
     std::uint16_t page_begin = 0;
     std::uint16_t page_end = 0;
   };
 
-  static constexpr std::uint16_t NormalizeChunkSize(std::uint16_t chunk_bytes) {
-    if (chunk_bytes < 16U) {
+  static constexpr std::uint16_t NormalizeChunkSize(std::uint16_t chunk_bytes)
+  {
+    if (chunk_bytes < 16U)
+    {
       return 16U;
     }
-    if (chunk_bytes > MAX_DATA_PAYLOAD) {
+    if (chunk_bytes > MAX_DATA_PAYLOAD)
+    {
       return static_cast<std::uint16_t>(MAX_DATA_PAYLOAD);
     }
     return chunk_bytes;
   }
 
-  bool Init() {
+  bool Init()
+  {
     last_frame_valid_ = false;
 
     static constexpr std::uint8_t INIT_COMMANDS[] = {
@@ -140,7 +156,7 @@ private:
         CMD_SET_CLOCK_DIV,
         0x80,
         CMD_SET_MULTIPLEX,
-        static_cast<std::uint8_t>(Display::HEIGHT - 1U),
+        static_cast<std::uint8_t>(DisplaySurface::HEIGHT - 1U),
         CMD_SET_DISPLAY_OFFSET,
         0x00,
         CMD_SET_START_LINE,
@@ -163,54 +179,62 @@ private:
     };
     static constexpr std::uint8_t DISPLAY_ON[] = {CMD_DISPLAY_ON};
 
-    if (WriteCommands(INIT_COMMANDS, sizeof(INIT_COMMANDS)) !=
-        LibXR::ErrorCode::OK) {
+    if (WriteCommands(INIT_COMMANDS, sizeof(INIT_COMMANDS)) != LibXR::ErrorCode::OK)
+    {
       return false;
     }
 
-    if (Clear() != LibXR::ErrorCode::OK) {
+    if (Clear() != LibXR::ErrorCode::OK)
+    {
       return false;
     }
 
     LibXR::Thread::Sleep(20);
-    return WriteCommands(DISPLAY_ON, sizeof(DISPLAY_ON)) ==
-           LibXR::ErrorCode::OK;
+    return WriteCommands(DISPLAY_ON, sizeof(DISPLAY_ON)) == LibXR::ErrorCode::OK;
   }
 
-  void RetryInit() {
-    const auto now_ms =
-        static_cast<std::uint32_t>(LibXR::Timebase::GetMilliseconds());
-    if ((now_ms - last_init_retry_ms_) < INIT_RETRY_INTERVAL_MS) {
+  void RetryInit()
+  {
+    const auto now_ms = static_cast<std::uint32_t>(LibXR::Timebase::GetMilliseconds());
+    if ((now_ms - last_init_retry_ms_) < INIT_RETRY_INTERVAL_MS)
+    {
       return;
     }
 
     last_init_retry_ms_ = now_ms;
     initialized_ = Init();
-    if (initialized_) {
+    if (initialized_)
+    {
       XR_LOG_PASS("SSD1306: init recovered");
     }
   }
 
-  LibXR::ErrorCode FlushFrame(const Display::Frame &frame) {
-    if (frame.data == nullptr) {
+  LibXR::ErrorCode FlushFrame(const DisplaySurface::Frame& frame)
+  {
+    if (frame.data == nullptr)
+    {
       return LibXR::ErrorCode::PTR_NULL;
     }
-    if (frame.pixel_format != Display::PixelFormat::MONO_VTILED_LSB ||
-        frame.width != Display::WIDTH || frame.height != Display::HEIGHT ||
-        frame.pitch != Display::WIDTH ||
-        frame.size < static_cast<std::uint32_t>(Display::FRAMEBUFFER_SIZE)) {
+    if (frame.pixel_format != DisplaySurface::PixelFormat::MONO_VTILED_LSB ||
+        frame.width != DisplaySurface::WIDTH || frame.height != DisplaySurface::HEIGHT ||
+        frame.pitch != DisplaySurface::WIDTH ||
+        frame.size < static_cast<std::uint32_t>(DisplaySurface::FRAMEBUFFER_SIZE))
+    {
       return LibXR::ErrorCode::ARG_ERR;
     }
 
     FlushBounds bounds{};
-    if (!ResolveFlushBounds(frame, bounds)) {
+    if (!ResolveFlushBounds(frame, bounds))
+    {
       return LibXR::ErrorCode::OK;
     }
 
-    if (!last_frame_valid_) {
-      bounds = {0, Display::WIDTH, 0, Display::PAGES};
+    if (!last_frame_valid_)
+    {
+      bounds = {0, DisplaySurface::WIDTH, 0, DisplaySurface::PAGES};
       const auto ans = FlushPageRanges(frame.data, bounds);
-      if (ans == LibXR::ErrorCode::OK) {
+      if (ans == LibXR::ErrorCode::OK)
+      {
         StoreFrameBounds(frame.data, bounds);
         last_frame_valid_ = true;
       }
@@ -218,29 +242,32 @@ private:
     }
 
     const auto ans = FlushDirtyRanges(frame.data, bounds);
-    if (ans == LibXR::ErrorCode::OK) {
+    if (ans == LibXR::ErrorCode::OK)
+    {
       StoreFrameBounds(frame.data, bounds);
     }
     return ans;
   }
 
-  LibXR::ErrorCode Clear() {
+  LibXR::ErrorCode Clear()
+  {
     auto ans = SetFullWindow();
-    if (ans != LibXR::ErrorCode::OK) {
+    if (ans != LibXR::ErrorCode::OK)
+    {
       return ans;
     }
 
     std::fill(data_packet_.begin(), data_packet_.end(), 0);
     data_packet_[0] = CTRL_DATA;
 
-    std::size_t remaining = Display::FRAMEBUFFER_SIZE;
-    while (remaining > 0U) {
-      const std::size_t payload =
-          std::min<std::size_t>(chunk_payload_size_, remaining);
-      ans = i2c_->Write(address_,
-                        LibXR::ConstRawData(data_packet_.data(), payload + 1U),
+    std::size_t remaining = DisplaySurface::FRAMEBUFFER_SIZE;
+    while (remaining > 0U)
+    {
+      const std::size_t payload = std::min<std::size_t>(chunk_payload_size_, remaining);
+      ans = i2c_->Write(address_, LibXR::ConstRawData(data_packet_.data(), payload + 1U),
                         write_op_);
-      if (ans != LibXR::ErrorCode::OK) {
+      if (ans != LibXR::ErrorCode::OK)
+      {
         return ans;
       }
       remaining -= payload;
@@ -251,26 +278,29 @@ private:
     return LibXR::ErrorCode::OK;
   }
 
-  LibXR::ErrorCode SetFullWindow() {
+  LibXR::ErrorCode SetFullWindow()
+  {
     static constexpr std::uint8_t COMMANDS[] = {
         CMD_SET_MEMORY_MODE,
         0x00,
         CMD_SET_COLUMN_ADDRESS,
         0x00,
-        static_cast<std::uint8_t>(Display::WIDTH - 1U),
+        static_cast<std::uint8_t>(DisplaySurface::WIDTH - 1U),
         CMD_SET_PAGE_ADDRESS,
         0x00,
-        static_cast<std::uint8_t>(Display::PAGES - 1U),
+        static_cast<std::uint8_t>(DisplaySurface::PAGES - 1U),
     };
 
     return WriteCommands(COMMANDS, sizeof(COMMANDS));
   }
 
-  LibXR::ErrorCode SetWindow(std::uint16_t x, std::uint16_t page,
-                             std::uint16_t width, std::uint16_t pages) {
-    if (width == 0U || pages == 0U || x >= Display::WIDTH ||
-        page >= Display::PAGES || (x + width) > Display::WIDTH ||
-        (page + pages) > Display::PAGES) {
+  LibXR::ErrorCode SetWindow(std::uint16_t x, std::uint16_t page, std::uint16_t width,
+                             std::uint16_t pages)
+  {
+    if (width == 0U || pages == 0U || x >= DisplaySurface::WIDTH ||
+        page >= DisplaySurface::PAGES || (x + width) > DisplaySurface::WIDTH ||
+        (page + pages) > DisplaySurface::PAGES)
+    {
       return LibXR::ErrorCode::ARG_ERR;
     }
 
@@ -289,8 +319,10 @@ private:
   }
 
   static std::uint16_t ClipEnd(std::uint16_t begin, std::uint16_t length,
-                               std::uint16_t limit) {
-    if (begin >= limit) {
+                               std::uint16_t limit)
+  {
+    if (begin >= limit)
+    {
       return limit;
     }
 
@@ -299,50 +331,52 @@ private:
     return end > limit ? limit : static_cast<std::uint16_t>(end);
   }
 
-  static bool ResolveFlushBounds(const Display::Frame &frame,
-                                 FlushBounds &bounds) {
-    if (frame.full_update) {
-      bounds = {0, Display::WIDTH, 0, Display::PAGES};
+  static bool ResolveFlushBounds(const DisplaySurface::Frame& frame, FlushBounds& bounds)
+  {
+    if (frame.full_update)
+    {
+      bounds = {0, DisplaySurface::WIDTH, 0, DisplaySurface::PAGES};
       return true;
     }
 
     if (frame.dirty_width == 0U || frame.dirty_height == 0U ||
-        frame.x >= Display::WIDTH || frame.y >= Display::HEIGHT) {
+        frame.x >= DisplaySurface::WIDTH || frame.y >= DisplaySurface::HEIGHT)
+    {
       return false;
     }
 
-    const std::uint16_t x_end =
-        ClipEnd(frame.x, frame.dirty_width, Display::WIDTH);
-    const std::uint16_t y_end =
-        ClipEnd(frame.y, frame.dirty_height, Display::HEIGHT);
-    const std::uint16_t page_begin =
-        static_cast<std::uint16_t>(frame.y >> 3U);
-    const std::uint16_t page_end =
-        static_cast<std::uint16_t>((y_end + 7U) >> 3U);
+    const std::uint16_t x_end = ClipEnd(frame.x, frame.dirty_width, DisplaySurface::WIDTH);
+    const std::uint16_t y_end = ClipEnd(frame.y, frame.dirty_height, DisplaySurface::HEIGHT);
+    const std::uint16_t page_begin = static_cast<std::uint16_t>(frame.y >> 3U);
+    const std::uint16_t page_end = static_cast<std::uint16_t>((y_end + 7U) >> 3U);
 
-    if (x_end <= frame.x || page_end <= page_begin) {
+    if (x_end <= frame.x || page_end <= page_begin)
+    {
       return false;
     }
 
     bounds = {frame.x, x_end, page_begin,
-              std::min<std::uint16_t>(page_end, Display::PAGES)};
+              std::min<std::uint16_t>(page_end, DisplaySurface::PAGES)};
     return bounds.page_end > bounds.page_begin;
   }
 
-  LibXR::ErrorCode FlushPageRanges(const std::uint8_t *frame_data,
-                                   const FlushBounds &bounds) {
-    for (std::uint16_t page = bounds.page_begin; page < bounds.page_end;
-         ++page) {
+  LibXR::ErrorCode FlushPageRanges(const std::uint8_t* frame_data,
+                                   const FlushBounds& bounds)
+  {
+    for (std::uint16_t page = bounds.page_begin; page < bounds.page_end; ++page)
+    {
       const std::uint16_t width = bounds.x_end - bounds.x_begin;
       auto ans = SetWindow(bounds.x_begin, page, width, 1U);
-      if (ans != LibXR::ErrorCode::OK) {
+      if (ans != LibXR::ErrorCode::OK)
+      {
         return ans;
       }
 
       const std::size_t offset =
-          static_cast<std::size_t>(page) * Display::WIDTH + bounds.x_begin;
+          static_cast<std::size_t>(page) * DisplaySurface::WIDTH + bounds.x_begin;
       ans = WriteData(frame_data + offset, width);
-      if (ans != LibXR::ErrorCode::OK) {
+      if (ans != LibXR::ErrorCode::OK)
+      {
         return ans;
       }
     }
@@ -350,20 +384,23 @@ private:
     return LibXR::ErrorCode::OK;
   }
 
-  LibXR::ErrorCode FlushDirtyRanges(const std::uint8_t *frame_data,
-                                    const FlushBounds &bounds) {
-    for (std::uint16_t page = bounds.page_begin; page < bounds.page_end;
-         ++page) {
-      const std::size_t page_offset =
-          static_cast<std::size_t>(page) * Display::WIDTH;
+  LibXR::ErrorCode FlushDirtyRanges(const std::uint8_t* frame_data,
+                                    const FlushBounds& bounds)
+  {
+    for (std::uint16_t page = bounds.page_begin; page < bounds.page_end; ++page)
+    {
+      const std::size_t page_offset = static_cast<std::size_t>(page) * DisplaySurface::WIDTH;
       std::uint16_t pos = bounds.x_begin;
 
-      while (pos < bounds.x_end) {
+      while (pos < bounds.x_end)
+      {
         while (pos < bounds.x_end &&
-               last_frame_[page_offset + pos] == frame_data[page_offset + pos]) {
+               last_frame_[page_offset + pos] == frame_data[page_offset + pos])
+        {
           ++pos;
         }
-        if (pos >= bounds.x_end) {
+        if (pos >= bounds.x_end)
+        {
           break;
         }
 
@@ -372,13 +409,18 @@ private:
         std::uint16_t clean_count = 0;
         ++pos;
 
-        while (pos < bounds.x_end) {
-          if (last_frame_[page_offset + pos] != frame_data[page_offset + pos]) {
+        while (pos < bounds.x_end)
+        {
+          if (last_frame_[page_offset + pos] != frame_data[page_offset + pos])
+          {
             last_dirty = pos;
             clean_count = 0;
-          } else {
+          }
+          else
+          {
             ++clean_count;
-            if (clean_count >= DIRTY_SPLIT_GAP) {
+            if (clean_count >= DIRTY_SPLIT_GAP)
+            {
               pos = static_cast<std::uint16_t>(last_dirty + 1U);
               break;
             }
@@ -389,12 +431,14 @@ private:
         const std::uint16_t run_width =
             static_cast<std::uint16_t>(last_dirty - run_start + 1U);
         auto ans = SetWindow(run_start, page, run_width, 1U);
-        if (ans != LibXR::ErrorCode::OK) {
+        if (ans != LibXR::ErrorCode::OK)
+        {
           return ans;
         }
 
         ans = WriteData(frame_data + page_offset + run_start, run_width);
-        if (ans != LibXR::ErrorCode::OK) {
+        if (ans != LibXR::ErrorCode::OK)
+        {
           return ans;
         }
       }
@@ -403,34 +447,36 @@ private:
     return LibXR::ErrorCode::OK;
   }
 
-  void StoreFrameBounds(const std::uint8_t *frame_data,
-                        const FlushBounds &bounds) {
+  void StoreFrameBounds(const std::uint8_t* frame_data, const FlushBounds& bounds)
+  {
     const std::size_t width = bounds.x_end - bounds.x_begin;
-    for (std::uint16_t page = bounds.page_begin; page < bounds.page_end;
-         ++page) {
+    for (std::uint16_t page = bounds.page_begin; page < bounds.page_end; ++page)
+    {
       const std::size_t offset =
-          static_cast<std::size_t>(page) * Display::WIDTH + bounds.x_begin;
+          static_cast<std::size_t>(page) * DisplaySurface::WIDTH + bounds.x_begin;
       std::memcpy(last_frame_.data() + offset, frame_data + offset, width);
     }
   }
 
-  LibXR::ErrorCode WriteCommands(const std::uint8_t *commands,
-                                 std::size_t size) {
-    if (commands == nullptr && size != 0U) {
+  LibXR::ErrorCode WriteCommands(const std::uint8_t* commands, std::size_t size)
+  {
+    if (commands == nullptr && size != 0U)
+    {
       return LibXR::ErrorCode::PTR_NULL;
     }
 
     std::size_t offset = 0;
-    while (offset < size) {
+    while (offset < size)
+    {
       const std::size_t payload =
           std::min<std::size_t>(COMMAND_PAYLOAD_CHUNK, size - offset);
       command_packet_[0] = CTRL_COMMAND;
       std::memcpy(command_packet_.data() + 1U, commands + offset, payload);
 
       auto ans = i2c_->Write(
-          address_, LibXR::ConstRawData(command_packet_.data(), payload + 1U),
-          write_op_);
-      if (ans != LibXR::ErrorCode::OK) {
+          address_, LibXR::ConstRawData(command_packet_.data(), payload + 1U), write_op_);
+      if (ans != LibXR::ErrorCode::OK)
+      {
         return ans;
       }
 
@@ -440,22 +486,25 @@ private:
     return LibXR::ErrorCode::OK;
   }
 
-  LibXR::ErrorCode WriteData(const std::uint8_t *data, std::size_t size) {
-    if (data == nullptr && size != 0U) {
+  LibXR::ErrorCode WriteData(const std::uint8_t* data, std::size_t size)
+  {
+    if (data == nullptr && size != 0U)
+    {
       return LibXR::ErrorCode::PTR_NULL;
     }
 
     std::size_t offset = 0;
-    while (offset < size) {
+    while (offset < size)
+    {
       const std::size_t payload =
           std::min<std::size_t>(chunk_payload_size_, size - offset);
       data_packet_[0] = CTRL_DATA;
       std::memcpy(data_packet_.data() + 1U, data + offset, payload);
 
       auto ans = i2c_->Write(
-          address_, LibXR::ConstRawData(data_packet_.data(), payload + 1U),
-          write_op_);
-      if (ans != LibXR::ErrorCode::OK) {
+          address_, LibXR::ConstRawData(data_packet_.data(), payload + 1U), write_op_);
+      if (ans != LibXR::ErrorCode::OK)
+      {
         return ans;
       }
 
@@ -467,14 +516,14 @@ private:
 
   std::uint8_t address_ = DEFAULT_ADDRESS;
   std::uint16_t chunk_payload_size_ = MAX_DATA_PAYLOAD;
-  LibXR::I2C *i2c_ = nullptr;
+  LibXR::I2C* i2c_ = nullptr;
   LibXR::Topic frame_topic_;
-  LibXR::Topic::ASyncSubscriber<Display::Frame> frame_sub_;
+  LibXR::Topic::ASyncSubscriber<DisplaySurface::Frame> frame_sub_;
   LibXR::WriteOperation write_op_;
-  Display::Frame pending_frame_{};
+  DisplaySurface::Frame pending_frame_{};
   std::array<std::uint8_t, COMMAND_PACKET_SIZE> command_packet_{};
   std::array<std::uint8_t, DATA_PACKET_SIZE> data_packet_{};
-  std::array<std::uint8_t, Display::FRAMEBUFFER_SIZE> last_frame_{};
+  std::array<std::uint8_t, DisplaySurface::FRAMEBUFFER_SIZE> last_frame_{};
   std::uint32_t last_init_retry_ms_ = 0;
   std::uint32_t last_error_log_ms_ = 0;
   bool initialized_ = false;
