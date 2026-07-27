@@ -4,15 +4,13 @@
 /* === MODULE MANIFEST V2 ===
 module_description: SSD1306 OLED panel backend that subscribes to DisplaySurface frames and flushes over I2C.
 constructor_args:
-  - i2c_alias: "i2c_oled"
-  - address: 0x3C
-  - frame_topic_name: "display_frame"
-  - chunk_bytes: 64
+  - config:
+      expr: SSD1306::Config{"i2c_oled", 0x3C, 128, 64, "display_frame", 64}
 template_args: []
 required_hardware:
   - i2c_oled
 depends:
-  - jie-org/DisplaySurface
+  - DisplaySurface
 === END MANIFEST === */
 // clang-format on
 
@@ -33,17 +31,29 @@ depends:
 class SSD1306 : public LibXR::Application
 {
  public:
-  static constexpr std::uint8_t DEFAULT_ADDRESS = 0x3C;
+  struct Config
+  {
+    const char* i2c_alias;
+    std::uint8_t address;
+    std::uint16_t width;
+    std::uint16_t height;
+    const char* frame_topic_name;
+    std::uint16_t chunk_bytes;
+  };
 
   SSD1306(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-          const char* i2c_alias = "i2c_oled", std::uint8_t address = DEFAULT_ADDRESS,
-          const char* frame_topic_name = DisplaySurface::DEFAULT_FRAME_TOPIC,
-          std::uint16_t chunk_bytes = MAX_DATA_PAYLOAD)
-      : address_(address),
-        chunk_payload_size_(NormalizeChunkSize(chunk_bytes)),
-        i2c_(hw.template FindOrExit<LibXR::I2C>({i2c_alias})),
-        frame_topic_(LibXR::Topic::CreateTopic<DisplaySurface::Frame>(frame_topic_name)),
-        frame_sub_(frame_topic_)
+          Config config)
+      : address_(config.address),
+        width_(CheckedWidth(config.width)),
+        height_(CheckedHeight(config.height)),
+        pages_(CalculatePages(height_)),
+        framebuffer_size_(CalculateFramebufferSize(width_, pages_)),
+        chunk_payload_size_(NormalizeChunkSize(config.chunk_bytes)),
+        i2c_(hw.template FindOrExit<LibXR::I2C>({config.i2c_alias})),
+        frame_topic_(LibXR::Topic::CreateTopic<DisplaySurface::Frame>(
+            config.frame_topic_name)),
+        frame_sub_(frame_topic_),
+        last_frame_(new std::uint8_t[framebuffer_size_]{})
   {
     app.Register(*this);
     (void)i2c_->SetConfig({400000U});
@@ -59,6 +69,10 @@ class SSD1306 : public LibXR::Application
       XR_LOG_WARN("SSD1306: init failed, will retry");
     }
   }
+
+  bool IsInitialized() const { return initialized_; }
+  std::uint16_t Width() const { return width_; }
+  std::uint16_t Height() const { return height_; }
 
   void OnMonitor() override
   {
@@ -125,6 +139,8 @@ class SSD1306 : public LibXR::Application
   static constexpr std::uint16_t DIRTY_SPLIT_GAP = 16U;
   static constexpr std::uint32_t INIT_RETRY_INTERVAL_MS = 500;
   static constexpr std::uint32_t ERROR_LOG_INTERVAL_MS = 1000;
+  static constexpr std::uint16_t MAX_WIDTH = 128;
+  static constexpr std::uint16_t MAX_HEIGHT = 64;
 
   struct FlushBounds
   {
@@ -147,23 +163,48 @@ class SSD1306 : public LibXR::Application
     return chunk_bytes;
   }
 
+  static std::uint16_t CheckedWidth(std::uint16_t width)
+  {
+    ASSERT(width != 0U && width <= MAX_WIDTH);
+    return width;
+  }
+
+  static std::uint16_t CheckedHeight(std::uint16_t height)
+  {
+    ASSERT(height != 0U && height <= MAX_HEIGHT);
+    return height;
+  }
+
+  static std::uint16_t CalculatePages(std::uint16_t height)
+  {
+    return static_cast<std::uint16_t>((height + 7U) >> 3U);
+  }
+
+  static std::size_t CalculateFramebufferSize(std::uint16_t width,
+                                              std::uint16_t pages)
+  {
+    return static_cast<std::size_t>(width) * pages;
+  }
+
+  std::uint8_t GetComPinsConfig() const { return height_ <= 32U ? 0x02 : 0x12; }
+
   bool Init()
   {
     last_frame_valid_ = false;
 
-    static constexpr std::uint8_t INIT_COMMANDS[] = {
+    const std::uint8_t init_commands[] = {
         CMD_DISPLAY_OFF,
         CMD_SET_CLOCK_DIV,
         0x80,
         CMD_SET_MULTIPLEX,
-        static_cast<std::uint8_t>(DisplaySurface::HEIGHT - 1U),
+        static_cast<std::uint8_t>(height_ - 1U),
         CMD_SET_DISPLAY_OFFSET,
         0x00,
         CMD_SET_START_LINE,
         CMD_SET_SEGMENT_REMAP,
         CMD_SET_COM_SCAN_DEC,
         CMD_SET_COM_PINS,
-        0x12,
+        GetComPinsConfig(),
         CMD_SET_CONTRAST,
         0x7F,
         CMD_ENTIRE_DISPLAY_RAM,
@@ -179,7 +220,7 @@ class SSD1306 : public LibXR::Application
     };
     static constexpr std::uint8_t DISPLAY_ON[] = {CMD_DISPLAY_ON};
 
-    if (WriteCommands(INIT_COMMANDS, sizeof(INIT_COMMANDS)) != LibXR::ErrorCode::OK)
+    if (WriteCommands(init_commands, sizeof(init_commands)) != LibXR::ErrorCode::OK)
     {
       return false;
     }
@@ -216,9 +257,8 @@ class SSD1306 : public LibXR::Application
       return LibXR::ErrorCode::PTR_NULL;
     }
     if (frame.pixel_format != DisplaySurface::PixelFormat::MONO_VTILED_LSB ||
-        frame.width != DisplaySurface::WIDTH || frame.height != DisplaySurface::HEIGHT ||
-        frame.pitch != DisplaySurface::WIDTH ||
-        frame.size < static_cast<std::uint32_t>(DisplaySurface::FRAMEBUFFER_SIZE))
+        frame.width != width_ || frame.height != height_ || frame.pitch != width_ ||
+        frame.size < static_cast<std::uint32_t>(framebuffer_size_))
     {
       return LibXR::ErrorCode::ARG_ERR;
     }
@@ -231,20 +271,20 @@ class SSD1306 : public LibXR::Application
 
     if (!last_frame_valid_)
     {
-      bounds = {0, DisplaySurface::WIDTH, 0, DisplaySurface::PAGES};
-      const auto ans = FlushPageRanges(frame.data, bounds);
+      bounds = {0, width_, 0, pages_};
+      const auto ans = FlushPageRanges(frame, bounds);
       if (ans == LibXR::ErrorCode::OK)
       {
-        StoreFrameBounds(frame.data, bounds);
+        StoreFrameBounds(frame, bounds);
         last_frame_valid_ = true;
       }
       return ans;
     }
 
-    const auto ans = FlushDirtyRanges(frame.data, bounds);
+    const auto ans = FlushDirtyRanges(frame, bounds);
     if (ans == LibXR::ErrorCode::OK)
     {
-      StoreFrameBounds(frame.data, bounds);
+      StoreFrameBounds(frame, bounds);
     }
     return ans;
   }
@@ -260,7 +300,7 @@ class SSD1306 : public LibXR::Application
     std::fill(data_packet_.begin(), data_packet_.end(), 0);
     data_packet_[0] = CTRL_DATA;
 
-    std::size_t remaining = DisplaySurface::FRAMEBUFFER_SIZE;
+    std::size_t remaining = framebuffer_size_;
     while (remaining > 0U)
     {
       const std::size_t payload = std::min<std::size_t>(chunk_payload_size_, remaining);
@@ -273,33 +313,32 @@ class SSD1306 : public LibXR::Application
       remaining -= payload;
     }
 
-    std::fill(last_frame_.begin(), last_frame_.end(), 0);
+    std::fill(last_frame_, last_frame_ + framebuffer_size_, 0);
     last_frame_valid_ = true;
     return LibXR::ErrorCode::OK;
   }
 
   LibXR::ErrorCode SetFullWindow()
   {
-    static constexpr std::uint8_t COMMANDS[] = {
+    const std::uint8_t commands[] = {
         CMD_SET_MEMORY_MODE,
         0x00,
         CMD_SET_COLUMN_ADDRESS,
         0x00,
-        static_cast<std::uint8_t>(DisplaySurface::WIDTH - 1U),
+        static_cast<std::uint8_t>(width_ - 1U),
         CMD_SET_PAGE_ADDRESS,
         0x00,
-        static_cast<std::uint8_t>(DisplaySurface::PAGES - 1U),
+        static_cast<std::uint8_t>(pages_ - 1U),
     };
 
-    return WriteCommands(COMMANDS, sizeof(COMMANDS));
+    return WriteCommands(commands, sizeof(commands));
   }
 
   LibXR::ErrorCode SetWindow(std::uint16_t x, std::uint16_t page, std::uint16_t width,
                              std::uint16_t pages)
   {
-    if (width == 0U || pages == 0U || x >= DisplaySurface::WIDTH ||
-        page >= DisplaySurface::PAGES || (x + width) > DisplaySurface::WIDTH ||
-        (page + pages) > DisplaySurface::PAGES)
+    if (width == 0U || pages == 0U || x >= width_ || page >= pages_ ||
+        (x + width) > width_ || (page + pages) > pages_)
     {
       return LibXR::ErrorCode::ARG_ERR;
     }
@@ -331,22 +370,22 @@ class SSD1306 : public LibXR::Application
     return end > limit ? limit : static_cast<std::uint16_t>(end);
   }
 
-  static bool ResolveFlushBounds(const DisplaySurface::Frame& frame, FlushBounds& bounds)
+  bool ResolveFlushBounds(const DisplaySurface::Frame& frame, FlushBounds& bounds) const
   {
     if (frame.full_update)
     {
-      bounds = {0, DisplaySurface::WIDTH, 0, DisplaySurface::PAGES};
+      bounds = {0, width_, 0, pages_};
       return true;
     }
 
     if (frame.dirty_width == 0U || frame.dirty_height == 0U ||
-        frame.x >= DisplaySurface::WIDTH || frame.y >= DisplaySurface::HEIGHT)
+        frame.x >= width_ || frame.y >= height_)
     {
       return false;
     }
 
-    const std::uint16_t x_end = ClipEnd(frame.x, frame.dirty_width, DisplaySurface::WIDTH);
-    const std::uint16_t y_end = ClipEnd(frame.y, frame.dirty_height, DisplaySurface::HEIGHT);
+    const std::uint16_t x_end = ClipEnd(frame.x, frame.dirty_width, width_);
+    const std::uint16_t y_end = ClipEnd(frame.y, frame.dirty_height, height_);
     const std::uint16_t page_begin = static_cast<std::uint16_t>(frame.y >> 3U);
     const std::uint16_t page_end = static_cast<std::uint16_t>((y_end + 7U) >> 3U);
 
@@ -355,12 +394,11 @@ class SSD1306 : public LibXR::Application
       return false;
     }
 
-    bounds = {frame.x, x_end, page_begin,
-              std::min<std::uint16_t>(page_end, DisplaySurface::PAGES)};
+    bounds = {frame.x, x_end, page_begin, std::min<std::uint16_t>(page_end, pages_)};
     return bounds.page_end > bounds.page_begin;
   }
 
-  LibXR::ErrorCode FlushPageRanges(const std::uint8_t* frame_data,
+  LibXR::ErrorCode FlushPageRanges(const DisplaySurface::Frame& frame,
                                    const FlushBounds& bounds)
   {
     for (std::uint16_t page = bounds.page_begin; page < bounds.page_end; ++page)
@@ -373,8 +411,8 @@ class SSD1306 : public LibXR::Application
       }
 
       const std::size_t offset =
-          static_cast<std::size_t>(page) * DisplaySurface::WIDTH + bounds.x_begin;
-      ans = WriteData(frame_data + offset, width);
+          static_cast<std::size_t>(page) * frame.pitch + bounds.x_begin;
+      ans = WriteData(frame.data + offset, width);
       if (ans != LibXR::ErrorCode::OK)
       {
         return ans;
@@ -384,18 +422,20 @@ class SSD1306 : public LibXR::Application
     return LibXR::ErrorCode::OK;
   }
 
-  LibXR::ErrorCode FlushDirtyRanges(const std::uint8_t* frame_data,
+  LibXR::ErrorCode FlushDirtyRanges(const DisplaySurface::Frame& frame,
                                     const FlushBounds& bounds)
   {
     for (std::uint16_t page = bounds.page_begin; page < bounds.page_end; ++page)
     {
-      const std::size_t page_offset = static_cast<std::size_t>(page) * DisplaySurface::WIDTH;
+      const std::size_t last_page_offset = static_cast<std::size_t>(page) * width_;
+      const std::size_t frame_page_offset = static_cast<std::size_t>(page) * frame.pitch;
       std::uint16_t pos = bounds.x_begin;
 
       while (pos < bounds.x_end)
       {
         while (pos < bounds.x_end &&
-               last_frame_[page_offset + pos] == frame_data[page_offset + pos])
+               last_frame_[last_page_offset + pos] ==
+                   frame.data[frame_page_offset + pos])
         {
           ++pos;
         }
@@ -411,7 +451,7 @@ class SSD1306 : public LibXR::Application
 
         while (pos < bounds.x_end)
         {
-          if (last_frame_[page_offset + pos] != frame_data[page_offset + pos])
+          if (last_frame_[last_page_offset + pos] != frame.data[frame_page_offset + pos])
           {
             last_dirty = pos;
             clean_count = 0;
@@ -436,7 +476,7 @@ class SSD1306 : public LibXR::Application
           return ans;
         }
 
-        ans = WriteData(frame_data + page_offset + run_start, run_width);
+        ans = WriteData(frame.data + frame_page_offset + run_start, run_width);
         if (ans != LibXR::ErrorCode::OK)
         {
           return ans;
@@ -447,14 +487,16 @@ class SSD1306 : public LibXR::Application
     return LibXR::ErrorCode::OK;
   }
 
-  void StoreFrameBounds(const std::uint8_t* frame_data, const FlushBounds& bounds)
+  void StoreFrameBounds(const DisplaySurface::Frame& frame, const FlushBounds& bounds)
   {
     const std::size_t width = bounds.x_end - bounds.x_begin;
     for (std::uint16_t page = bounds.page_begin; page < bounds.page_end; ++page)
     {
-      const std::size_t offset =
-          static_cast<std::size_t>(page) * DisplaySurface::WIDTH + bounds.x_begin;
-      std::memcpy(last_frame_.data() + offset, frame_data + offset, width);
+      const std::size_t last_offset =
+          static_cast<std::size_t>(page) * width_ + bounds.x_begin;
+      const std::size_t frame_offset =
+          static_cast<std::size_t>(page) * frame.pitch + bounds.x_begin;
+      std::memcpy(last_frame_ + last_offset, frame.data + frame_offset, width);
     }
   }
 
@@ -514,8 +556,12 @@ class SSD1306 : public LibXR::Application
     return LibXR::ErrorCode::OK;
   }
 
-  std::uint8_t address_ = DEFAULT_ADDRESS;
-  std::uint16_t chunk_payload_size_ = MAX_DATA_PAYLOAD;
+  std::uint8_t address_ = 0;
+  std::uint16_t width_ = 0;
+  std::uint16_t height_ = 0;
+  std::uint16_t pages_ = 0;
+  std::size_t framebuffer_size_ = 0;
+  std::uint16_t chunk_payload_size_ = 0;
   LibXR::I2C* i2c_ = nullptr;
   LibXR::Topic frame_topic_;
   LibXR::Topic::ASyncSubscriber<DisplaySurface::Frame> frame_sub_;
@@ -523,7 +569,7 @@ class SSD1306 : public LibXR::Application
   DisplaySurface::Frame pending_frame_{};
   std::array<std::uint8_t, COMMAND_PACKET_SIZE> command_packet_{};
   std::array<std::uint8_t, DATA_PACKET_SIZE> data_packet_{};
-  std::array<std::uint8_t, DisplaySurface::FRAMEBUFFER_SIZE> last_frame_{};
+  std::uint8_t* last_frame_ = nullptr;
   std::uint32_t last_init_retry_ms_ = 0;
   std::uint32_t last_error_log_ms_ = 0;
   bool initialized_ = false;
