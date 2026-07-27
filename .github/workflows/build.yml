@@ -22,6 +22,12 @@ jobs:
         with:
           path: Modules/${{ env.XR_MODULE_NAME }}
 
+      - name: Checkout DisplaySurface dependency
+        uses: actions/checkout@v4
+        with:
+          repository: verdancy-org/DisplaySurface
+          path: Modules/DisplaySurface
+
       - name: Create main.cpp
         run: |
           cat > main.cpp <<'EOF'
