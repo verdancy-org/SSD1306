@@ -12,7 +12,7 @@ template_args: []
 required_hardware:
   - i2c_oled
 depends:
-  - DisplaySurface
+  - jie-org/DisplaySurface
 === END MANIFEST === */
 // clang-format on
 
